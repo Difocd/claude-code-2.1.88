@@ -4,9 +4,14 @@
 
 当前状态：
 - 已通过 `reverse-sourcemap` 还原出 `cli/`
-- 已补出 external 重建脚手架
+- external 工作区已经整理为 `package/cli`（包含 vendor-deps、node_modules、构建脚本）
 - 已生成可执行产物 `package/dist/cli.external.js`
 - `auto-mode defaults` 输出已和官方 `cli.js` 对齐
+
+
+## 0. 效果图
+
+![效果](./image.png)
 
 ## 1. 获取发布包和 sourcemap
 
@@ -20,41 +25,44 @@ reverse-sourcemap -o cli -v cli.js.map
 
 ## 2. 目录说明
 
-- `package/cli/`: reverse-sourcemap 还原出的源码树
-- `package/package.external.json`: external 重建用 manifest
-- `package/analyze-external-deps.mjs`: 自动回填构建依赖
-- `package/build-external.mjs`: external CLI 重建脚本
-- `package/external-release-profile.mjs`: external feature/env/macro profile
+- `package/cli/`: 归一化后的 external workspace（src、vendor、vendor-deps、node_modules、package.json、bun.lock）
 - `package/dist/cli.external.js`: 当前重建产物
+- `package/dist/cli.external.js.map`: 对应 sourcemap
+- `package/vendor/`: 需要保留的 native/vendor 源
+- 根目录 `cli.js` / `cli.js.map`: 官方发布包原始文件
 
-## 3. 分析依赖
+## 3. 安装依赖
 
-先根据 `cli/node_modules` 和 `cli.js.map` 自动回填依赖：
-
-```sh
-cd package
-node analyze-external-deps.mjs
-```
-
-如果要继续用 npm registry 补公开包版本：
+External workspace 已经包含完整的 `package.json` / `bun.lock`，直接在目录内安装即可：
 
 ```sh
-node analyze-external-deps.mjs --registry-latest
+cd package/cli
+bun install --frozen-lockfile
 ```
+
+如需重新校准依赖，可结合 `cli.js.map` 和 `node_modules` 自行审计并更新 `package/cli/package.json`。
 
 ## 4. 重建 external CLI
 
+所有构建脚本都写在 `package/cli/package.json` 里，通过 Bun 运行：
+
 ```sh
-cd package
-node build-external.mjs
+cd package/cli
+bun run build:external          # 单次构建
+bun run build:external:watch    # watch 模式
 ```
 
-常用参数：
+底层命令等价于：
 
 ```sh
-node build-external.mjs --check
-node build-external.mjs --print-profile
-node build-external.mjs --no-minify
+bun build src/entrypoints/cli.tsx \
+  --outdir ../dist \
+  --entry-naming cli.external.js \
+  --target node \
+  --format esm \
+  --sourcemap=linked \
+  --minify \
+  --banner '#!/usr/bin/env node'
 ```
 
 ## 5. 验证
@@ -94,16 +102,12 @@ node dist/cli.external.js auto-mode defaults
 
 3. **开发/调试构建**
    ```sh
-   cd package
-   node build-external.mjs \
-     --build-dir cli/.external-build \
-     --out dist/cli.external.js \
-     --no-minify \
-     --print-profile
-   node dist/cli.external.js --help
+   cd package/cli
+   bun run build:external -- --no-minify   # 可传递额外 bun build flag
+   node ../dist/cli.external.js --help
    ```
-   - 修改 `package/cli/**` 后直接重复 `node build-external.mjs`
-   - 需要跳过 Feature 检查时，可改 `external-release-profile.mjs`
+   - 修改 `package/cli/**` 后直接重复 `bun run build:external`
+   - Feature/Env/Macro 相关常量现在直接写在源码里（不再依赖单独 profile 文件）
 
 4. **本地验证**
    ```sh
@@ -131,4 +135,4 @@ node dist/cli.external.js auto-mode defaults
    - 发布前务必运行 `node build-external.mjs --check`
    - 如需生成 sourcemap，保持 `externalBundleProfile.sourcemap = 'linked'`
 
-![效果](./image.png)
+

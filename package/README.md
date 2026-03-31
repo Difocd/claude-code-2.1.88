@@ -41,3 +41,30 @@ See our [data usage policies](https://code.claude.com/docs/en/data-usage).
 We have implemented several safeguards to protect your data, including limited retention periods for sensitive information and restricted access to user session data.
 
 For full details, please review our [Commercial Terms of Service](https://www.anthropic.com/legal/commercial-terms) and [Privacy Policy](https://www.anthropic.com/legal/privacy).
+
+## External CLI rebuild
+
+The repository now keeps the transformed CLI workspace directly under `package/cli`, so rebuilding the external bundle only requires Bun:
+
+```sh
+cd package/cli
+bun install
+bun build src/entrypoints/cli.tsx \
+  --outdir ../dist \
+  --entry-naming cli.external.js \
+  --target node \
+  --format esm \
+  --sourcemap=linked \
+  --minify \
+  --banner '#!/usr/bin/env node'
+```
+
+You can also rely on the scripts baked into `package/cli/package.json`:
+
+```sh
+cd package/cli
+bun run build:external          # one-off build
+bun run build:external:watch    # rebuild on every change
+```
+
+The resulting `dist/cli.external.js` and `dist/cli.external.js.map` match the previous pipeline, and you can add `--watch` to the build command while iterating locally.
