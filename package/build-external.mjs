@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -493,9 +494,77 @@ function writeStubFiles(stagedSourceDir) {
   }
 }
 
+function writeWorkspaceMetadata(buildDir, macros) {
+  const metadata = {
+    featureProfile: externalFeatureProfile,
+    envProfile: externalEnvProfile,
+    macros,
+    generatedAt: new Date().toISOString(),
+  };
+  writeFileSync(
+    path.join(buildDir, 'profile.json'),
+    `${JSON.stringify(metadata, null, 2)}\n`,
+  );
+}
+
+function ensureExistingLocalWorkspacePackages(buildDir) {
+  for (const packageName of Object.keys(localWorkspacePackages)) {
+    const packageDir = packageDirForWorkspacePackage(buildDir, packageName);
+    if (existsSync(packageDir) && !lstatSync(packageDir).isSymbolicLink()) {
+      continue;
+    }
+
+    const fallbackSources = [];
+    const descriptor = localWorkspacePackages[packageName];
+    if (descriptor && existsSync(descriptor.sourceDir)) {
+      fallbackSources.push(descriptor.sourceDir);
+    }
+    const vendorDepDir = path.join(cliDir, 'vendor-deps', ...packageName.split('/'));
+    if (existsSync(vendorDepDir)) {
+      fallbackSources.push(vendorDepDir);
+    }
+
+    let restored = false;
+    for (const candidate of fallbackSources) {
+      if (!candidate) continue;
+      if (!existsSync(candidate)) continue;
+      rmSync(packageDir, { recursive: true, force: true });
+      mkdirSync(path.dirname(packageDir), { recursive: true });
+      cpSync(candidate, packageDir, { recursive: true, force: true });
+      restored = true;
+      break;
+    }
+
+    if (!restored) {
+      throw new Error(
+        `Unable to hydrate workspace package ${packageName}. Provide ${packageDir} or restore ${fallbackSources.join(' or ')}`,
+      );
+    }
+  }
+}
+
+function hydrateExistingWorkspace(buildDir, stagedSourceDir, macros) {
+  if (!existsSync(stagedSourceDir)) {
+    throw new Error(
+      `Missing staged workspace source directory: ${stagedSourceDir}. Restore cli/src or keep the transformed workspace intact.`,
+    );
+  }
+
+  ensureExistingLocalWorkspacePackages(buildDir);
+  writeStubFiles(stagedSourceDir);
+  prepareWorkspaceManifest(buildDir);
+  writeWorkspaceMetadata(buildDir, macros);
+}
+
 function prepareWorkspace(buildDir, macros) {
   const stagedSourceDir = path.join(buildDir, 'src');
   mkdirSync(buildDir, { recursive: true });
+
+  if (!existsSync(sourceDir)) {
+    hydrateExistingWorkspace(buildDir, stagedSourceDir, macros);
+    return;
+  }
+
   resetGeneratedWorkspace(buildDir);
   mkdirSync(stagedSourceDir, { recursive: true });
 
@@ -523,17 +592,7 @@ function prepareWorkspace(buildDir, macros) {
   writeStubFiles(stagedSourceDir);
   prepareLocalWorkspacePackages(buildDir);
   prepareWorkspaceManifest(buildDir);
-
-  const metadata = {
-    featureProfile: externalFeatureProfile,
-    envProfile: externalEnvProfile,
-    macros,
-    generatedAt: new Date().toISOString(),
-  };
-  writeFileSync(
-    path.join(buildDir, 'profile.json'),
-    `${JSON.stringify(metadata, null, 2)}\n`,
-  );
+  writeWorkspaceMetadata(buildDir, macros);
 }
 
 function ensureShebang(outputFile) {
@@ -607,17 +666,34 @@ function runBuild(options, macros) {
   }
 }
 
-function assertInputs() {
-  if (!existsSync(sourceDir)) {
-    throw new Error(`Missing source directory: ${sourceDir}`);
-  }
+function assertInputs(buildDir) {
   if (!existsSync(manifestTemplateFile)) {
     throw new Error(`Missing manifest template: ${manifestTemplateFile}`);
   }
-  for (const [packageName, descriptor] of Object.entries(localWorkspacePackages)) {
-    if (!existsSync(descriptor.sourceDir)) {
+
+  if (existsSync(sourceDir)) {
+    for (const [packageName, descriptor] of Object.entries(localWorkspacePackages)) {
+      if (!existsSync(descriptor.sourceDir)) {
+        throw new Error(
+          `Missing local package source for ${packageName}: ${descriptor.sourceDir}`,
+        );
+      }
+    }
+    return;
+  }
+
+  const stagedSourceDir = path.join(buildDir, 'src');
+  if (!existsSync(stagedSourceDir)) {
+    throw new Error(
+      `Missing source directory. Provide ${sourceDir} or keep ${stagedSourceDir} intact.`,
+    );
+  }
+
+  for (const packageName of Object.keys(localWorkspacePackages)) {
+    const packageDir = packageDirForWorkspacePackage(buildDir, packageName);
+    if (!existsSync(packageDir)) {
       throw new Error(
-        `Missing local package source for ${packageName}: ${descriptor.sourceDir}`,
+        `Missing vendored workspace package for ${packageName}: ${packageDir}`,
       );
     }
   }
@@ -653,7 +729,7 @@ function main() {
     return;
   }
 
-  assertInputs();
+  assertInputs(options.buildDir);
   prepareWorkspace(options.buildDir, macros);
 
   if (options.check) {
