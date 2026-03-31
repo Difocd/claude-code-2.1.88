@@ -33,7 +33,7 @@ export const externalMacroDefaults = Object.freeze({
 });
 
 export const externalBundleProfile = Object.freeze({
-  entrypoint: 'cli/.external-build/src/main.tsx',
+  entrypoint: 'src/entrypoints/cli.tsx',
   outfile: 'dist/cli.external.js',
   target: 'node',
   format: 'esm',

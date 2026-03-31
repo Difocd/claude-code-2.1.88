@@ -12,6 +12,8 @@ function parseArgs(argv) {
     write: true,
     placeholder: '*',
     registryLatest: false,
+    registryConcurrency: 24,
+    registryTimeoutMs: 10000,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -27,6 +29,16 @@ function parseArgs(argv) {
     }
     if (arg === '--registry-latest') {
       options.registryLatest = true;
+      continue;
+    }
+    if (arg === '--registry-concurrency') {
+      options.registryConcurrency = Number.parseInt(argv[index + 1], 10);
+      index += 1;
+      continue;
+    }
+    if (arg === '--registry-timeout-ms') {
+      options.registryTimeoutMs = Number.parseInt(argv[index + 1], 10);
+      index += 1;
       continue;
     }
     if (arg === '--help' || arg === '-h') {
@@ -48,6 +60,10 @@ function printHelp() {
       '  --dry-run               Print the inferred dependency payload only',
       '  --placeholder <value>   Placeholder version for unresolved packages',
       '  --registry-latest       Resolve unresolved packages from npm dist-tags.latest',
+      '  --registry-concurrency <n>',
+      '                          Concurrent registry requests (default: 24)',
+      '  --registry-timeout-ms <ms>',
+      '                          Per-request timeout for registry lookups (default: 10000)',
       '  -h, --help              Show this help',
       '',
     ].join('\n'),
@@ -159,6 +175,20 @@ function findVersionEvidence(name) {
     { kind: 'version-var', re: new RegExp(`\\b(?:const|let|var)\\s+version\\b[^\\n]{0,32}?['"]${semver}['"]`) },
     { kind: 'release-please', re: new RegExp(`['"]${semver}['"][^\\n]*x-release-please-version`) },
   ];
+  const packageSpecificRegexes = {
+    '@ant/claude-for-chrome-mcp': [
+      {
+        kind: 'embedded-metadata',
+        re: /version:\s*["'](\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)["']/,
+      },
+    ],
+    '@ant/computer-use-mcp': [
+      {
+        kind: 'embedded-metadata',
+        re: /version:\s*["'](\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)["']/,
+      },
+    ],
+  };
 
   for (const filePath of files) {
     if (!/\.(?:js|mjs|cjs|ts|tsx|json)$/.test(filePath)) continue;
@@ -190,6 +220,16 @@ function findVersionEvidence(name) {
           };
         }
       }
+      for (const { kind, re } of packageSpecificRegexes[name] ?? []) {
+        const match = line.match(re);
+        if (match) {
+          return {
+            version: match[1],
+            evidence: `${relPath}:${index + 1}`,
+            kind,
+          };
+        }
+      }
     }
   }
 
@@ -212,13 +252,19 @@ function inferVersion(name, placeholder, manifest) {
   return placeholder;
 }
 
-async function resolveLatestFromRegistry(name) {
+async function resolveLatestFromRegistry(name, timeoutMs) {
   const url = `https://registry.npmjs.org/${encodeURIComponent(name)}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const response = await fetch(url, {
     headers: { accept: 'application/json' },
+    signal: controller.signal,
   });
+  clearTimeout(timer);
   if (!response.ok) {
-    throw new Error(`registry lookup failed for ${name}: HTTP ${response.status}`);
+    throw new Error(
+      `registry lookup failed for ${name}: HTTP ${response.status}`,
+    );
   }
   const metadata = await response.json();
   const version = metadata?.['dist-tags']?.latest;
@@ -232,17 +278,30 @@ async function resolveLatestFromRegistry(name) {
   };
 }
 
-async function resolveRegistryVersions(names) {
+async function resolveRegistryVersions(names, options) {
   const resolved = {};
-  for (const name of names) {
-    try {
-      resolved[name] = await resolveLatestFromRegistry(name);
-    } catch (error) {
-      resolved[name] = {
-        error: error instanceof Error ? error.message : String(error),
-      };
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < names.length) {
+      const index = cursor;
+      cursor += 1;
+      const name = names[index];
+      try {
+        resolved[name] = await resolveLatestFromRegistry(
+          name,
+          options.registryTimeoutMs,
+        );
+      } catch (error) {
+        resolved[name] = {
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
     }
   }
+
+  const concurrency = Math.max(1, options.registryConcurrency);
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
   return resolved;
 }
 
@@ -278,7 +337,10 @@ async function main() {
   }
 
   if (options.registryLatest && unresolvedNeedingRegistry.length > 0) {
-    const registryResolved = await resolveRegistryVersions(unresolvedNeedingRegistry);
+    const registryResolved = await resolveRegistryVersions(
+      unresolvedNeedingRegistry,
+      options,
+    );
     unresolvedVersions.length = 0;
     for (const name of Object.keys(registryResolved).sort((left, right) =>
       left.localeCompare(right),
@@ -306,6 +368,8 @@ async function main() {
     'x-generated-dependencies': {
       sourceSignals: ['cli/node_modules', 'cli.js.map'],
       registryLatestEnabled: options.registryLatest,
+      registryConcurrency: options.registryConcurrency,
+      registryTimeoutMs: options.registryTimeoutMs,
       inferredDependencyCount: Object.keys(dependencies).length,
       resolvedVersionCount: Object.keys(resolvedEvidence).length,
       unresolvedVersionCount: unresolvedVersions.length,
